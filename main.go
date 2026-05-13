@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
+	"strings"
 	"sync/atomic"
 )
 
@@ -51,7 +53,8 @@ func validateChirp(resp http.ResponseWriter, req *http.Request) {
 	}
 
 	type validReturn struct {
-		Valid bool `json:"valid"`
+		Valid       bool   `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	var params validParams
@@ -68,7 +71,8 @@ func validateChirp(resp http.ResponseWriter, req *http.Request) {
 	}
 
 	respondWithJSON(resp, 200, &validReturn{
-		Valid: true,
+		Valid:       true,
+		CleanedBody: cleanChirp(params.Body),
 	})
 }
 
@@ -98,6 +102,24 @@ func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Add("Content-Type", "application/json")
 	w.WriteHeader(code)
 	w.Write(bytes)
+}
+
+func cleanChirp(chirp string) string {
+	words := strings.Split(chirp, " ")
+
+	badWords := []string{
+		"kerfuffle",
+		"sharbert",
+		"fornax",
+	}
+
+	for i, word := range words {
+		if slices.Contains(badWords, strings.ToLower(word)) {
+			words[i] = "****"
+		}
+	}
+
+	return strings.Join(words, " ")
 }
 
 func main() {
