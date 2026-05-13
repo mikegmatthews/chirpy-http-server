@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,7 +23,14 @@ func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 func (c *apiConfig) handleHitResponse(resp http.ResponseWriter, req *http.Request) {
 	hits := c.fileserverHits.Load()
 	resp.WriteHeader(http.StatusOK)
-	fmt.Fprintf(resp, "Hits: %d", hits)
+	resp.Header().Add("Content-Type", "text/html")
+	fmt.Fprintf(resp, `
+<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html>`, hits)
 }
 
 func (c *apiConfig) handleReset(resp http.ResponseWriter, req *http.Request) {
@@ -37,6 +45,61 @@ func healthStatus(resp http.ResponseWriter, req *http.Request) {
 	resp.Write([]byte("OK"))
 }
 
+func validateChirp(resp http.ResponseWriter, req *http.Request) {
+	type validParams struct {
+		Body string `json:"body"`
+	}
+
+	type validReturn struct {
+		Valid bool `json:"valid"`
+	}
+
+	var params validParams
+	decoder := json.NewDecoder(req.Body)
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(resp, 500, fmt.Sprintf("Error decoding body JSON: %s\n", err))
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respondWithError(resp, 400, "Chirp is too long")
+		return
+	}
+
+	respondWithJSON(resp, 200, &validReturn{
+		Valid: true,
+	})
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	w.WriteHeader(code)
+	w.Header().Add("Content-Type", "application/json")
+	resp := errorResponse{
+		Error: msg,
+	}
+	bytes, err := json.Marshal(&resp)
+	if err != nil {
+		log.Printf("Error creating JSON error payload: %s\n", err)
+	}
+	w.Write(bytes)
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload any) {
+	bytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error marshaling JSON payload: %s\n", err)
+	}
+
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(bytes)
+}
+
 func main() {
 	serveMux := http.NewServeMux()
 	server := http.Server{
@@ -49,8 +112,9 @@ func main() {
 	appHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	serveMux.Handle("/app/", conf.middlewareMetricsInc(appHandler))
 	serveMux.HandleFunc("GET /api/healthz", healthStatus)
-	serveMux.HandleFunc("GET /api/metrics", conf.handleHitResponse)
-	serveMux.HandleFunc("POST /api/reset", conf.handleReset)
+	serveMux.HandleFunc("GET /admin/metrics", conf.handleHitResponse)
+	serveMux.HandleFunc("POST /admin/reset", conf.handleReset)
+	serveMux.HandleFunc("POST /api/validate_chirp", validateChirp)
 
 	log.Println("Starting HTTP server on port 8080")
 	log.Fatal(server.ListenAndServe())
