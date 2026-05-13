@@ -48,9 +48,9 @@ func main() {
 
 	appHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	serveMux.Handle("/app/", conf.middlewareMetricsInc(appHandler))
-	serveMux.HandleFunc("GET /healthz", healthStatus)
-	serveMux.HandleFunc("GET /metrics", conf.handleHitResponse)
-	serveMux.HandleFunc("POST /reset", conf.handleReset)
+	serveMux.HandleFunc("GET /api/healthz", healthStatus)
+	serveMux.HandleFunc("GET /api/metrics", conf.handleHitResponse)
+	serveMux.HandleFunc("POST /api/reset", conf.handleReset)
 
 	log.Println("Starting HTTP server on port 8080")
 	log.Fatal(server.ListenAndServe())
