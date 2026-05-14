@@ -1,17 +1,24 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+	"github.com/mikegmatthews/chirpy-http-server/internal/database"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -123,6 +130,14 @@ func cleanChirp(chirp string) string {
 }
 
 func main() {
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Error opening PostgreSQL connection: %s\n", err)
+	}
+
 	serveMux := http.NewServeMux()
 	server := http.Server{
 		Handler: serveMux,
@@ -130,6 +145,7 @@ func main() {
 	}
 
 	conf := apiConfig{}
+	conf.dbQueries = database.New(db)
 
 	appHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	serveMux.Handle("/app/", conf.middlewareMetricsInc(appHandler))
