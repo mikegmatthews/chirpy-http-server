@@ -7,27 +7,73 @@ package database
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 const creatUser = `-- name: CreatUser :one
-INSERT INTO users (id, created_at, updated_at, email)
+INSERT INTO users (id, created_at, updated_at, email, hashed_password)
 VALUES (
-       get_random_uuid(),
+       gen_random_uuid(),
        now(),
        now(),
-       $1
+       $1,
+       $2
 )
-RETURNING id, created_at, updated_at, email
+RETURNING id, created_at, updated_at, email, hashed_password
 `
 
-func (q *Queries) CreatUser(ctx context.Context, email string) (User, error) {
-	row := q.db.QueryRowContext(ctx, creatUser, email)
+type CreatUserParams struct {
+	Email          string
+	HashedPassword string
+}
+
+func (q *Queries) CreatUser(ctx context.Context, arg CreatUserParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, creatUser, arg.Email, arg.HashedPassword)
 	var i User
 	err := row.Scan(
 		&i.ID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Email,
+		&i.HashedPassword,
+	)
+	return i, err
+}
+
+const deleteAllUsers = `-- name: DeleteAllUsers :exec
+DELETE FROM users
+`
+
+func (q *Queries) DeleteAllUsers(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllUsers)
+	return err
+}
+
+const deleteUser = `-- name: DeleteUser :exec
+DELETE FROM users
+WHERE id = $1
+`
+
+func (q *Queries) DeleteUser(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteUser, id)
+	return err
+}
+
+const getUserByEmail = `-- name: GetUserByEmail :one
+SELECT id, created_at, updated_at, email, hashed_password FROM users
+WHERE email = $1
+`
+
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByEmail, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+		&i.HashedPassword,
 	)
 	return i, err
 }
