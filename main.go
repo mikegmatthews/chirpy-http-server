@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -21,6 +22,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	secret         string
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -131,13 +133,86 @@ func (c *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	jwt, err := auth.MakeJWT(dbUser.ID, c.secret, time.Hour)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Error creating JWT: %s\n", err))
+		return
+	}
+
+	refresh, err := c.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:  auth.MakeRefreshToken(),
+		UserID: dbUser.ID,
+		ExpiresAt: sql.NullTime{
+			Time:  time.Now().AddDate(0, 0, 60),
+			Valid: true,
+		},
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Error creating refresh token: %s\n", err))
+		return
+	}
+
 	loggedInUser := User{
 		ID:        dbUser.ID,
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
+		Token:     jwt,
+		Refresh:   refresh.Token,
 	}
 	respondWithJSON(w, http.StatusOK, loggedInUser)
+}
+
+func (c *apiConfig) handleRefreshJWT(w http.ResponseWriter, r *http.Request) {
+	refresh, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	refreshDb, err := c.dbQueries.GetRefreshToken(r.Context(), refresh)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Refresh token not found")
+		return
+	}
+
+	if refreshDb.RevokedAt.Valid || time.Now().After(refreshDb.ExpiresAt.Time) {
+		respondWithError(w, http.StatusUnauthorized, "Refresh token expired or revoked")
+		return
+	}
+
+	jwt, err := auth.MakeJWT(refreshDb.UserID, c.secret, time.Hour)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Error refreshing JWT: %s\n", err))
+		return
+	}
+
+	type refreshedJWT struct {
+		Token string `json:"token"`
+	}
+	respondWithJSON(w, http.StatusOK, refreshedJWT{
+		Token: jwt,
+	})
+}
+
+func (c *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	refresh, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	err = c.dbQueries.RevokeRefreshToken(r.Context(), refresh)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Error revoking refresh token: %s\n", err))
+		return
+	}
+
+	respondWithJSON(w, http.StatusNoContent, nil)
 }
 
 func (c *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
@@ -146,9 +221,21 @@ func (c *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
 		UserID uuid.UUID `json:"user_id"`
 	}
 
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	authId, err := auth.ValidateJWT(token, c.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
 	var params chirpReq
 	decoder := json.NewDecoder(r.Body)
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding body JSON: %s\n", err))
 		return
@@ -161,7 +248,7 @@ func (c *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
 
 	dbReturn, err := c.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   params.Body,
-		UserID: params.UserID,
+		UserID: authId,
 	})
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error creating new chirp: %s\n", err))
@@ -280,6 +367,7 @@ func main() {
 	godotenv.Load()
 
 	dbURL := os.Getenv("DB_URL")
+	secret := os.Getenv("SECRET")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("Error opening PostgreSQL connection: %s\n", err)
@@ -291,8 +379,10 @@ func main() {
 		Addr:    ":8080",
 	}
 
-	conf := apiConfig{}
-	conf.dbQueries = database.New(db)
+	conf := apiConfig{
+		dbQueries: database.New(db),
+		secret:    secret,
+	}
 
 	appHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	serveMux.Handle("/app/", conf.middlewareMetricsInc(appHandler))
@@ -304,6 +394,8 @@ func main() {
 	serveMux.HandleFunc("GET /api/chirps/{chirpID}", conf.handleGetChirp)
 	serveMux.HandleFunc("POST /api/users", conf.handleCreateUser)
 	serveMux.HandleFunc("POST /api/login", conf.handleLogin)
+	serveMux.HandleFunc("POST /api/refresh", conf.handleRefreshJWT)
+	serveMux.HandleFunc("POST /api/revoke", conf.handleRevoke)
 
 	log.Println("Starting HTTP server on port 8080")
 	log.Fatal(server.ListenAndServe())
