@@ -107,6 +107,55 @@ func (c *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, newUser)
 }
 
+func (c *apiConfig) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	jwt, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	userId, err := auth.ValidateJWT(jwt, c.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	type updateParams struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	var updateUser updateParams
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&updateUser)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(updateUser.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	user, err := c.dbQueries.UpdateUserEmailPass(r.Context(), database.UpdateUserEmailPassParams{
+		ID:             userId,
+		Email:          updateUser.Email,
+		HashedPassword: hashedPassword,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
+}
+
 func (c *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type loginParams struct {
 		Password string `json:"password"`
@@ -265,6 +314,40 @@ func (c *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 201, newChirp)
 }
 
+func (c *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	jwt, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	userId, err := auth.ValidateJWT(jwt, c.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	chirpId, err := uuid.Parse(r.PathValue("chirpID"))
+	chirp, err := c.dbQueries.GetChirp(r.Context(), chirpId)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	if chirp.UserID != userId {
+		respondWithError(w, http.StatusForbidden, "")
+		return
+	}
+
+	err = c.dbQueries.DeleteChirp(r.Context(), chirpId)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (c *apiConfig) handleGetAllChirps(w http.ResponseWriter, r *http.Request) {
 	dbChirps, err := c.dbQueries.GetAllChirps(r.Context())
 	if err != nil {
@@ -392,7 +475,9 @@ func main() {
 	serveMux.HandleFunc("POST /api/chirps", conf.handleCreateChirp)
 	serveMux.HandleFunc("GET /api/chirps", conf.handleGetAllChirps)
 	serveMux.HandleFunc("GET /api/chirps/{chirpID}", conf.handleGetChirp)
+	serveMux.HandleFunc("DELETE /api/chirps/{chirpID}", conf.handleDeleteChirp)
 	serveMux.HandleFunc("POST /api/users", conf.handleCreateUser)
+	serveMux.HandleFunc("PUT /api/users", conf.handleUpdateUser)
 	serveMux.HandleFunc("POST /api/login", conf.handleLogin)
 	serveMux.HandleFunc("POST /api/refresh", conf.handleRefreshJWT)
 	serveMux.HandleFunc("POST /api/revoke", conf.handleRevoke)
