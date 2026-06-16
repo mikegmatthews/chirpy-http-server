@@ -23,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	secret         string
+	polkaKey       string
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -99,10 +100,11 @@ func (c *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newUser := User{
-		ID:        dbReturn.ID,
-		CreatedAt: dbReturn.CreatedAt,
-		UpdatedAt: dbReturn.UpdatedAt,
-		Email:     dbReturn.Email,
+		ID:          dbReturn.ID,
+		CreatedAt:   dbReturn.CreatedAt,
+		UpdatedAt:   dbReturn.UpdatedAt,
+		Email:       dbReturn.Email,
+		IsChirpyRed: dbReturn.IsChirpyRed,
 	}
 	respondWithJSON(w, http.StatusCreated, newUser)
 }
@@ -149,11 +151,61 @@ func (c *apiConfig) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	})
+}
+
+func (c *apiConfig) handleUpgradeToRed(w http.ResponseWriter, r *http.Request) {
+	type upgradeBody struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if apiKey != c.polkaKey {
+		respondWithError(w, http.StatusUnauthorized, "Invalid API key")
+		return
+	}
+
+	var newUpgrade upgradeBody
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&newUpgrade)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest,
+			fmt.Sprintf("Error decoding JSON body: %s\n", err))
+		return
+	}
+
+	if newUpgrade.Event != "user.upgraded" {
+		respondWithJSON(w, http.StatusNoContent, nil)
+		return
+	}
+
+	userId, err := uuid.Parse(newUpgrade.Data.UserID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Error parsing user ID: %s\n", err))
+		return
+	}
+
+	err = c.dbQueries.UpgradeUserToRed(r.Context(), userId)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound,
+			fmt.Sprintf("Error upgrading user: %s\n", err))
+		return
+	}
+
+	respondWithJSON(w, http.StatusNoContent, nil)
 }
 
 func (c *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -204,12 +256,13 @@ func (c *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loggedInUser := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-		Token:     jwt,
-		Refresh:   refresh.Token,
+		ID:          dbUser.ID,
+		CreatedAt:   dbUser.CreatedAt,
+		UpdatedAt:   dbUser.UpdatedAt,
+		Email:       dbUser.Email,
+		Token:       jwt,
+		Refresh:     refresh.Token,
+		IsChirpyRed: dbUser.IsChirpyRed,
 	}
 	respondWithJSON(w, http.StatusOK, loggedInUser)
 }
@@ -465,6 +518,7 @@ func main() {
 	conf := apiConfig{
 		dbQueries: database.New(db),
 		secret:    secret,
+		polkaKey:  os.Getenv("POLKA_KEY"),
 	}
 
 	appHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
@@ -481,6 +535,7 @@ func main() {
 	serveMux.HandleFunc("POST /api/login", conf.handleLogin)
 	serveMux.HandleFunc("POST /api/refresh", conf.handleRefreshJWT)
 	serveMux.HandleFunc("POST /api/revoke", conf.handleRevoke)
+	serveMux.HandleFunc("POST /api/polka/webhooks", conf.handleUpgradeToRed)
 
 	log.Println("Starting HTTP server on port 8080")
 	log.Fatal(server.ListenAndServe())
